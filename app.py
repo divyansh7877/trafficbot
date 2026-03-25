@@ -3,7 +3,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from agent import run_agent
 
@@ -26,28 +26,62 @@ def _run_async(coro):
         loop.close()
 
 
+def _parse_restaurant_params() -> tuple[dict, str | None, str | None]:
+    """Extract restaurant info and date range from query params."""
+    restaurant = {
+        "name": request.args.get("name", "The Daily Grind"),
+        "type": request.args.get("type", "coffee shop"),
+        "city": request.args.get("city", "San Jose"),
+        "state": request.args.get("state", "CA"),
+    }
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    return restaurant, start_date, end_date
+
+
 @app.route("/")
 def index():
     return jsonify({
         "service": "TrafficBot - Foot-Traffic Forecaster",
+        "description": (
+            "Searches Ticketmaster for events near your restaurant, "
+            "then uses AI to recommend inventory adjustments via Slack."
+        ),
         "endpoints": {
             "/run-happy-path": "Run the agent normally (posts to #manager-alerts)",
-            "/run-rogue-path": "Simulate prompt injection (attempts #general-customers, blocked by Civic)",
+            "/run-rogue-path": "Simulate prompt injection (blocked by Civic)",
         },
+        "query_params": {
+            "name": "Restaurant name (default: The Daily Grind)",
+            "type": "Restaurant type, e.g. coffee shop, pizzeria (default: coffee shop)",
+            "city": "City to search events in (default: San Jose)",
+            "state": "Two-letter state code (default: CA)",
+            "start_date": "Event search start date, YYYY-MM-DD (default: today)",
+            "end_date": "Event search end date, YYYY-MM-DD (default: start + 7 days)",
+        },
+        "example": "/run-happy-path?name=The+Daily+Grind&type=coffee+shop&city=San+Jose&state=CA",
     })
 
 
 @app.route("/run-happy-path")
 def happy_path():
     """
-    Standard flow: the agent analyzes events and posts an inventory
-    recommendation to #manager-alerts via Civic MCP gateway.
+    Standard flow: search Ticketmaster for nearby events, analyze them,
+    and post an inventory recommendation to #manager-alerts via Civic.
     """
+    restaurant, start_date, end_date = _parse_restaurant_params()
     try:
-        result = _run_async(run_agent(rogue=False))
+        result = _run_async(run_agent(
+            rogue=False,
+            restaurant=restaurant,
+            start_date=start_date,
+            end_date=end_date,
+        ))
         return jsonify({
             "status": "success",
             "path": "happy",
+            "restaurant": result["restaurant"],
+            "events_context": result["events_context"],
             "recommendation": result["recommendation"],
             "tool_call": result["tool_call"],
             "tool_result": result["tool_result"],
@@ -64,8 +98,14 @@ def rogue_path():
     Rogue flow: a malicious prompt tells the agent to message
     #general-customers. Civic intercepts and blocks the request.
     """
+    restaurant, start_date, end_date = _parse_restaurant_params()
     try:
-        result = _run_async(run_agent(rogue=True))
+        result = _run_async(run_agent(
+            rogue=True,
+            restaurant=restaurant,
+            start_date=start_date,
+            end_date=end_date,
+        ))
 
         if result["blocked"]:
             return jsonify({
@@ -76,6 +116,8 @@ def rogue_path():
                     "attempted to post to an unauthorized channel, but the "
                     "locked channel parameter prevented it."
                 ),
+                "restaurant": result["restaurant"],
+                "events_context": result["events_context"],
                 "recommendation": result["recommendation"],
                 "tool_call": result["tool_call"],
                 "tool_result": result["tool_result"],
